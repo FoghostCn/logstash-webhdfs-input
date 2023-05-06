@@ -1,7 +1,6 @@
 package com.foghost.logstash.plugin.input;
 
 import co.elastic.logstash.api.*;
-import com.fasterxml.jackson.databind.util.ByteBufferBackedOutputStream;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -23,21 +22,22 @@ public class WebHdfs implements Input {
     public static final PluginConfigSpec<String> USER_CONFIG = PluginConfigSpec.requiredStringSetting("user");
     public static final PluginConfigSpec<Codec> CODEC_CONFIG = PluginConfigSpec.codecSetting("codec", "java_line");
 
-    private final String id;
+    private final Logger logger;
+    private String id;
     protected String url;
     protected String userName;
     protected Codec codec;
+    private int count = 0;
     protected final CountDownLatch done = new CountDownLatch(1);
     protected final WebHdfsReader reader;
-    private final Logger logger;
 
     public WebHdfs(String id, Configuration config, Context context) {
+        this.logger = context != null ? context.getLogger(this) : LogManager.getLogger(this.getClass());
         this.id = (id == null || id.isEmpty()) ? UUID.randomUUID().toString() : id;
         this.url = config.get(URL_CONFIG);
         this.userName = config.get(USER_CONFIG);
         this.codec = config.get(CODEC_CONFIG);
         this.reader = new WebHdfsReader(url, userName);
-        this.logger = context != null ? context.getLogger(this) : LogManager.getLogger(this.getClass());
     }
 
     @Override
@@ -46,22 +46,25 @@ public class WebHdfs implements Input {
             reader.read((file, inputStream) -> {
                 try {
                     final ByteBuffer byteBuffer = ByteBuffer.allocateDirect(file.getLength());
-                    try (ByteBufferBackedOutputStream outputStream = new ByteBufferBackedOutputStream(byteBuffer)) {
-                        int b = inputStream.read();
-                        while (b != -1) {
-                            outputStream.write((byte)b);
-                            b = inputStream.read();
-                        }
+                    int c = 0;
+                    while (c++ < file.getLength()) {
+                        byteBuffer.put((byte) inputStream.read());
                     }
                     byteBuffer.flip();
-                    logger.info("read file:" + file.getPathSuffix() + " length:" + file.getLength() + " real length:" + byteBuffer.remaining());
-                    codec.decode(byteBuffer, consumer);
+                    codec.decode(byteBuffer, map -> {
+                        count++;
+                        consumer.accept(map);
+                    });
                 } catch (IOException e) {
+                    logger.error("read file error " + file.getPathSuffix(), e);
                     throw new RuntimeException(e);
                 }
             });
         } finally {
             done.countDown();
+            if (logger.isInfoEnabled()) {
+                logger.info("total docs read from hdfs: " + count);
+            }
         }
     }
 
